@@ -26,14 +26,25 @@ def resource_path(relative_path):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        # Create a copy of the connections list to avoid modification during iteration
+        connections_copy = self.active_connections.copy()
+        for connection in connections_copy:
+            try:
+                await connection.send_text(message)
+            except Exception as e:
+                print(f"--- Error sending message to WebSocket client: {e} ---")
+                # Remove the failed connection
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -47,6 +58,19 @@ class SimulationRequest(BaseModel):
 class LogEntry(BaseModel):
     agent_name: str
     log_line: str
+
+# --- Helper Functions ---
+def load_scenarios():
+    # FIX: Use resource_path to find the scenarios directory
+    scenarios_dir = resource_path("scenarios")
+    if not os.path.exists(scenarios_dir):
+        print(f"--- WARNING: Scenarios directory '{scenarios_dir}' not found. ---")
+        return
+    for filename in os.listdir(scenarios_dir):
+        if filename.endswith((".yaml", ".yml")):
+            filepath = os.path.join(scenarios_dir, filename)
+            db["scenarios"].append({"name": filename, "compose_file_path": filepath})
+    print(f"--- Loaded {len(db['scenarios'])} scenarios. ---")
 
 # Create the FastAPI application instance
 app = FastAPI(
@@ -62,24 +86,6 @@ app.mount("/static", StaticFiles(directory=resource_path("static")), name="stati
 # --- IN-MEMORY DATABASE ---
 db = { "agents": {}, "scenarios": [] }
 
-# --- Helper Functions ---
-def load_scenarios():
-    # FIX: Use resource_path to find the scenarios directory
-    scenarios_dir = resource_path("scenarios")
-    if not os.path.exists(scenarios_dir):
-        print(f"--- WARNING: Scenarios directory '{scenarios_dir}' not found. ---")
-        return
-    for filename in os.listdir(scenarios_dir):
-        if filename.endswith((".yaml", ".yml")):
-            filepath = os.path.join(scenarios_dir, filename)
-            db["scenarios"].append({"name": filename, "compose_file_path": filepath})
-    print(f"--- Loaded {len(db['scenarios'])} scenarios. ---")
-
-# --- FastAPI Events ---
-@app.on_event("startup")
-async def startup_event():
-    load_scenarios()
-
 # --- API ENDPOINTS ---
 
 @app.get("/", response_class=FileResponse, tags=["UI"])
@@ -89,13 +95,19 @@ async def read_index():
 
 @app.websocket("/ws/log-stream")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
     try:
+        await manager.connect(websocket)
+        print("--- UI Client connected to logs ---")
         while True:
+            # Keep connection alive by receiving messages
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print("--- UI Client disconnected from logs ---")
+    except Exception as e:
+        print(f"--- WebSocket error: {e} ---")
+        if websocket in manager.active_connections:
+            manager.disconnect(websocket)
 
 @app.post("/api/log", tags=["Logging"])
 async def receive_log(entry: LogEntry):
@@ -143,4 +155,7 @@ async def start_simulation(sim_request: SimulationRequest):
 # This block allows us to run the server directly from the script
 if __name__ == "__main__":
     print("--- Starting LISE Orchestrator Server ---")
+    # Load scenarios at startup
+    load_scenarios()
+    print("--- Starting uvicorn server ---")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)

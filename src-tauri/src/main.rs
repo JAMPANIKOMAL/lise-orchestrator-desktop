@@ -2,7 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::Manager;
-use std::process::Command; // Use Rust's standard library for commands
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 fn main() {
   tauri::Builder::default()
@@ -13,10 +15,37 @@ fn main() {
           .expect("failed to get resource directory")
           .join("main.exe");
 
-      // Launch the backend executable
-      Command::new(sidecar_path)
-          .spawn()
-          .expect("Failed to spawn sidecar");
+      println!("Starting backend at: {:?}", sidecar_path);
+
+      // Launch the backend executable with better error handling
+      match Command::new(&sidecar_path)
+          .stdout(Stdio::piped())
+          .stderr(Stdio::piped())
+          .spawn() {
+          Ok(mut child) => {
+              println!("Backend process started with PID: {}", child.id());
+              
+              // Give the backend a moment to start
+              thread::sleep(Duration::from_millis(2000));
+              
+              // Check if the process is still running
+              match child.try_wait() {
+                  Ok(Some(status)) => {
+                      eprintln!("Backend process exited early with status: {}", status);
+                  }
+                  Ok(None) => {
+                      println!("Backend process is running successfully");
+                  }
+                  Err(e) => {
+                      eprintln!("Error checking backend process status: {}", e);
+                  }
+              }
+          }
+          Err(e) => {
+              eprintln!("Failed to spawn backend: {}", e);
+              return Err(Box::new(e));
+          }
+      }
 
       Ok(())
     })
