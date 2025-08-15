@@ -125,7 +125,8 @@
         // --- API & WEBSOCKET FUNCTIONS ---
         async function fetchApi(endpoint) {
             try {
-                const response = await fetch(endpoint);
+                // In Tauri, always connect to localhost:8000 where the backend is running
+                const response = await fetch(`http://localhost:8000${endpoint}`);
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 return await response.json();
             } catch (error) {
@@ -158,7 +159,8 @@
             startBtn.disabled = true;
             startBtn.textContent = "Launching...";
             try {
-                const response = await fetch('/api/simulation/start', {
+                // In Tauri, always connect to localhost:8000 where the backend is running
+                const response = await fetch('http://localhost:8000/api/simulation/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ agent_name: state.selectedAgent, scenario_name: scenarioSelect.value })
@@ -176,8 +178,8 @@
         }
 
         function connectWebSocket() {
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws/log-stream`;
+            // In Tauri, always connect to localhost:8000 where the backend is running
+            const wsUrl = 'ws://localhost:8000/ws/log-stream';
             
             try {
                 const socket = new WebSocket(wsUrl);
