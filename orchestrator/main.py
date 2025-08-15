@@ -1,166 +1,175 @@
 # orchestrator/main.py
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+# The main application for the LISE Orchestrator.
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
-import os
-import sys
-import json
 import yaml
-import asyncio
-from typing import List, Dict, Set
+import os
+import requests
+import sys
+from typing import List, Dict, Any, Optional
 
 # --- Helper Function for PyInstaller ---
-def resource_path(relative_path):
+def resource_path(relative_path: str) -> str:
+    """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(os.path.dirname(__file__))
+        base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-# --- Data Models ---
+# --- Connection Manager for WebSockets ---
+class ConnectionManager:
+    """Manages active WebSocket connections for real-time log streaming."""
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        """Sends a message to all connected clients."""
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+# --- Pydantic Models ---
+class AgentRegistration(BaseModel):
+    display_name: str
+    ip_address: str
+
 class SimulationRequest(BaseModel):
     agent_name: str
     scenario_name: str
 
-# --- Connection Manager ---
-class ConnectionManager:
-    def __init__(self):
-        self.agent_connections: Dict[str, WebSocket] = {}
-        self.log_connections: Set[WebSocket] = set()
+class LogEntry(BaseModel):
+    agent_name: str
+    log_line: str
 
-    async def connect_agent(self, agent_name: str, websocket: WebSocket):
-        await websocket.accept()
-        self.agent_connections[agent_name] = websocket
-        await self.broadcast_log(f"[01:21:13] Agent {agent_name} initialized. Ready to connect.")
-        await self.broadcast_log(f"[01:21:16] Attempting to connect to orchestrator at 127.0.0.1:8000...")
-        await self.broadcast_log(f"[01:21:16] Connected to orchestrator at 127.0.0.1 as {agent_name}.")
-        print(f"--- Agent Connected: {agent_name} ---")
+# Create the FastAPI application instance
+app = FastAPI(
+    title="LISE Orchestrator API",
+    description="The central command server for the Local Incident Simulation Environment.",
+    version="1.0.0"
+)
 
-    async def disconnect_agent(self, agent_name: str):
-        if agent_name in self.agent_connections:
-            del self.agent_connections[agent_name]
-            await self.broadcast_log(f"[{self.get_timestamp()}] Agent {agent_name} disconnected.")
-            print(f"--- Agent Disconnected: {agent_name} ---")
+# --- Mount Static Files ---
+app.mount("/static", StaticFiles(directory=resource_path("static")), name="static")
 
-    async def connect_log_viewer(self, websocket: WebSocket):
-        await websocket.accept()
-        self.log_connections.add(websocket)
-        await websocket.send_text("--- Log stream connected ---")
+# --- IN-MEMORY DATABASE ---
+db = {"agents": {}, "scenarios": []}
 
-    async def disconnect_log_viewer(self, websocket: WebSocket):
-        self.log_connections.discard(websocket)
-
-    async def broadcast_log(self, message: str):
-        if self.log_connections:
-            disconnected = set()
-            for connection in self.log_connections:
-                try:
-                    await connection.send_text(message)
-                except:
-                    disconnected.add(connection)
-            # Remove disconnected connections
-            for conn in disconnected:
-                self.log_connections.discard(conn)
-
-    def get_timestamp(self):
-        from datetime import datetime
-        return datetime.now().strftime("%H:%M:%S")
-
-manager = ConnectionManager()
-app = FastAPI()
-
-# --- WebSocket Endpoint for Agents ---
-@app.websocket("/ws/{agent_name}")
-async def websocket_agent_endpoint(websocket: WebSocket, agent_name: str):
-    await manager.connect_agent(agent_name, websocket)
-    try:
-        while True:
-            # Keep connection open
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        await manager.disconnect_agent(agent_name)
-
-# --- API Endpoint for the UI to get the list of agents ---
-@app.get("/api/agents")
-async def get_agents():
-    agents = {}
-    for agent_name in manager.agent_connections.keys():
-        agents[agent_name] = {"status": "connected"}
-    return {"agents": agents}
-
-# --- API Endpoint for scenarios ---
-@app.get("/api/scenarios")
-async def get_scenarios():
-    scenarios = []
+# --- Helper Functions ---
+def load_scenarios():
+    """Loads scenario definitions from YAML files in the scenarios directory."""
     scenarios_dir = resource_path("scenarios")
-    
-    try:
-        if os.path.exists(scenarios_dir):
-            for filename in os.listdir(scenarios_dir):
-                if filename.endswith(('.yaml', '.yml')):
-                    scenario_name = filename.replace('.yaml', '').replace('.yml', '')
-                    scenarios.append({
-                        "name": scenario_name,
-                        "description": f"Incident scenario: {scenario_name}"
-                    })
-    except Exception as e:
-        print(f"Error loading scenarios: {e}")
-    
-    # Add default scenarios if none found
-    if not scenarios:
-        scenarios = [
-            {"name": "test-scenario", "description": "Basic test incident scenario"},
-            {"name": "web-attack", "description": "Web application attack simulation"},
-            {"name": "network-intrusion", "description": "Network intrusion simulation"}
-        ]
-    
-    return {"scenarios": scenarios}
+    if not os.path.exists(scenarios_dir):
+        print(f"--- WARNING: Scenarios directory '{scenarios_dir}' not found. ---")
+        return
+    for filename in os.listdir(scenarios_dir):
+        if filename.endswith((".yaml", ".yml")):
+            filepath = os.path.join(scenarios_dir, filename)
+            db["scenarios"].append({"name": filename, "compose_file_path": filepath})
+    print(f"--- Loaded {len(db['scenarios'])} scenarios. ---")
 
-# --- API Endpoint for starting simulation ---
-@app.post("/api/simulation/start")
-async def start_simulation(request: SimulationRequest):
-    if request.agent_name not in manager.agent_connections:
-        raise HTTPException(status_code=400, detail=f"Agent {request.agent_name} is not connected")
-    
-    # Send simulation start command to the agent
-    agent_ws = manager.agent_connections[request.agent_name]
-    try:
-        command = {
-            "action": "start_simulation",
-            "scenario": request.scenario_name
-        }
-        await agent_ws.send_text(json.dumps(command))
-        
-        # Log the simulation start
-        await manager.broadcast_log(f"[{manager.get_timestamp()}] Starting simulation '{request.scenario_name}' on agent '{request.agent_name}'")
-        await manager.broadcast_log(f"[{manager.get_timestamp()}] Simulation launched successfully")
-        
-        return {"status": "success", "message": f"Simulation started on {request.agent_name}"}
-    except Exception as e:
-        await manager.broadcast_log(f"[{manager.get_timestamp()}] Failed to start simulation: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to communicate with agent: {str(e)}")
+# --- FastAPI Events ---
+@app.on_event("startup")
+async def startup_event():
+    load_scenarios()
 
-# --- WebSocket Endpoint for Log Stream ---
+# --- API ENDPOINTS ---
+@app.get("/", response_class=FileResponse, tags=["UI"])
+async def read_index():
+    """Serves the main static HTML file for the orchestrator UI."""
+    return resource_path("static/index.html")
+
 @app.websocket("/ws/log-stream")
-async def websocket_log_endpoint(websocket: WebSocket):
-    await manager.connect_log_viewer(websocket)
+async def websocket_endpoint(websocket: WebSocket):
+    """Establishes a WebSocket connection for log streaming."""
+    await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive
             await websocket.receive_text()
     except WebSocketDisconnect:
-        await manager.disconnect_log_viewer(websocket)
+        manager.disconnect(websocket)
+        print("--- UI Client disconnected from logs ---")
 
-# --- Serve Static Files ---
-static_dir = resource_path("static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+@app.post("/api/log", tags=["Logging"])
+async def receive_log(entry: LogEntry):
+    """Receives a log entry from an agent and broadcasts it to UI clients."""
+    log_message = f"[{entry.agent_name}] {entry.log_line}"
+    await manager.broadcast(log_message)
+    return {"status": "log received"}
 
-@app.get("/")
-async def read_index():
-    return FileResponse(os.path.join(static_dir, 'index.html'))
+@app.post("/api/agents/register", tags=["Agent Management"])
+async def register_agent(agent: AgentRegistration):
+    """Registers an agent with the orchestrator."""
+    db["agents"][agent.display_name] = {"ip_address": agent.ip_address}
+    print(f"--- Agent Registered: {agent.display_name} at {agent.ip_address} ---")
+    return {"status": "success", "message": f"Agent '{agent.display_name}' registered."}
 
-# --- Main Execution ---
+@app.get("/api/agents", tags=["Agent Management"])
+async def get_registered_agents():
+    """Returns the list of currently registered agents."""
+    return {"agents": db["agents"]}
+
+@app.get("/api/scenarios", tags=["Scenario Management"])
+async def get_scenarios():
+    """Returns the list of available scenarios."""
+    return {"scenarios": db["scenarios"]}
+
+@app.post("/api/simulation/start", tags=["Simulation Control"])
+async def start_simulation(sim_request: SimulationRequest):
+    """Sends a command to an agent to start a specific simulation."""
+    agent_info = db["agents"].get(sim_request.agent_name)
+    if not agent_info:
+        raise HTTPException(status_code=404, detail=f"Agent '{sim_request.agent_name}' not found.")
+
+    scenario_info = next((s for s in db["scenarios"] if s["name"] == sim_request.scenario_name), None)
+    if not scenario_info:
+        raise HTTPException(status_code=404, detail=f"Scenario '{sim_request.scenario_name}' not found.")
+
+    agent_ip = agent_info["ip_address"]
+    agent_url = f"http://{agent_ip}:8000/api/scenario/start"
+    payload = {"compose_file_path": scenario_info["compose_file_path"]}
+
+    try:
+        print(f"--- Sending start command for '{sim_request.scenario_name}' to {sim_request.agent_name} at {agent_ip} ---")
+        response = requests.post(agent_url, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send command to agent: {e}")
+
+@app.post("/api/simulation/stop", tags=["Simulation Control"])
+async def stop_simulation(agent_name: str):
+    """Sends a command to an agent to stop the running simulation."""
+    agent_info = db["agents"].get(agent_name)
+    if not agent_info:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
+    
+    agent_ip = agent_info["ip_address"]
+    agent_url = f"http://{agent_ip}:8000/api/scenario/stop"
+
+    try:
+        print(f"--- Sending stop command to {agent_name} at {agent_ip} ---")
+        response = requests.post(agent_url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send stop command to agent: {e}")
+
+
+# This block allows us to run the server directly from the script
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
+    print("--- Starting LISE Orchestrator Server ---")
+    uvicorn.run(app, host="0.0.0.0", port=8080)
