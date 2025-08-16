@@ -16,4 +16,24 @@ python3 /app/vulnerable_app.py &
 # We also use -nographic to prevent QEMU from opening its own window.
 # The exec command replaces the current shell with the QEMU process, ensuring it is the main process.
 echo "Starting QEMU VM..."
-exec qemu-system-i386 -m 512 -cdrom /app/tinycore.iso -vnc 0.0.0.0:1 -nographic
+
+# Start QEMU with monitor interface using Unix socket for better compatibility
+qemu-system-i386 \
+  -m 512 \
+  -cdrom /app/tinycore.iso \
+  -vnc 0.0.0.0:1 \
+  -nographic \
+  -boot d \
+  -monitor unix:/tmp/qemu-monitor,server,nowait &
+
+QEMU_PID=$!
+
+# Wait for QEMU to start and reach the boot prompt
+sleep 15
+
+# Send Enter key via QEMU monitor using netcat or echo
+echo "Sending Enter key to proceed with boot..."
+echo "sendkey ret" | socat - unix:/tmp/qemu-monitor 2>/dev/null || true
+
+# Wait for the QEMU process to complete
+wait $QEMU_PID
