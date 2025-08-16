@@ -25,7 +25,6 @@ WORKDIR /app
 RUN wget http://tinycorelinux.net/13.x/x86/release/Core-current.iso -O tinycore.iso
 
 # Copy the vulnerable Flask application and the startup script
-# These paths are now relative to the current directory
 COPY vulnerable_app.py /app/vulnerable_app.py
 COPY start_vm.sh /start_vm.sh
 RUN chmod +x /start_vm.sh
