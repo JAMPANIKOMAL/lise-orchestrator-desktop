@@ -178,58 +178,21 @@
         function connectWebSocket() {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${wsProtocol}//${window.location.host}/ws/log-stream`;
-            
-            try {
-                const socket = new WebSocket(wsUrl);
+            const socket = new WebSocket(wsUrl);
 
-                socket.onopen = () => {
-                    addLog('--- Log stream connected ---');
-                };
-                
-                socket.onmessage = (event) => {
-                    addLog(event.data);
-                };
-                
-                socket.onclose = (event) => {
-                    if (event.wasClean) {
-                        addLog('--- Log stream disconnected cleanly ---');
-                    } else {
-                        addLog('--- Log stream disconnected unexpectedly. Attempting to reconnect... ---');
-                        setTimeout(connectWebSocket, 3000); // Reconnect after 3 seconds
-                    }
-                };
-                
-                socket.onerror = (event) => {
-                    let errorMsg = 'WebSocket Error: ';
-                    if (event && event.target && event.target.readyState !== undefined) {
-                        switch (event.target.readyState) {
-                            case WebSocket.CONNECTING:
-                                errorMsg += 'Connection attempt failed';
-                                break;
-                            case WebSocket.OPEN:
-                                errorMsg += 'Connection error during communication';
-                                break;
-                            case WebSocket.CLOSING:
-                                errorMsg += 'Connection closing with error';
-                                break;
-                            case WebSocket.CLOSED:
-                                errorMsg += 'Connection failed to establish';
-                                break;
-                            default:
-                                errorMsg += 'Unknown connection state';
-                        }
-                    } else {
-                        errorMsg += 'Connection failed - server may not be running';
-                    }
-                    addLog(errorMsg);
-                    console.error('WebSocket Error:', event);
-                };
-            } catch (error) {
-                addLog(`WebSocket Error: Failed to create connection - ${error.message}`);
-                console.error('WebSocket creation failed:', error);
-                // Retry connection after 5 seconds
-                setTimeout(connectWebSocket, 5000);
-            }
+            socket.onopen = () => {
+                addLog('--- Log stream connected ---');
+            };
+            socket.onmessage = (event) => {
+                addLog(event.data);
+            };
+            socket.onclose = () => {
+                addLog('--- Log stream disconnected. Attempting to reconnect... ---');
+                setTimeout(connectWebSocket, 3000); // Reconnect after 3 seconds
+            };
+            socket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+            };
         }
 
         // --- INITIALIZATION ---
