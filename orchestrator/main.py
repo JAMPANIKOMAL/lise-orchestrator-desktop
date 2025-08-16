@@ -129,15 +129,47 @@ async def start_simulation(sim_request: SimulationRequest):
 
     agent_ip = agent_info["ip_address"]
     agent_url = f"http://{agent_ip}:8000/api/scenario/start"
-    # FIX: Send the absolute path from the resource_path function
-    payload = {"compose_file_path": scenario_info["compose_file_path"]}
+    
+    # Read the scenario file content and send it instead of just the path
+    scenario_file_path = scenario_info["compose_file_path"]
+    try:
+        with open(scenario_file_path, 'r') as f:
+            scenario_content = f.read()
+        payload = {
+            "scenario_name": sim_request.scenario_name,
+            "compose_file_content": scenario_content,
+            "compose_file_path": scenario_file_path  # Keep this for backward compatibility
+        }
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Scenario file not found: {scenario_file_path}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading scenario file: {e}")
 
     try:
         print(f"--- Sending start command for '{sim_request.scenario_name}' to {sim_request.agent_name} at {agent_ip} ---")
-        response = requests.post(agent_url, json=payload, timeout=10)
+        print(f"--- Agent URL: {agent_url} ---")
+        print(f"--- Payload keys: {list(payload.keys())} ---")
+        
+        # First, check if the agent is reachable
+        try:
+            health_response = requests.get(f"http://{agent_ip}:8000/health", timeout=5)
+            print(f"--- Agent health check: {health_response.status_code} ---")
+        except requests.exceptions.RequestException:
+            print("--- Warning: Agent health check failed, proceeding anyway ---")
+        
+        response = requests.post(agent_url, json=payload, timeout=30)
+        print(f"--- Response status: {response.status_code} ---")
+        
+        if response.status_code != 200:
+            print(f"--- Response body: {response.text} ---")
+            
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
+        print(f"--- Request failed: {e} ---")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"--- Response status: {e.response.status_code} ---")
+            print(f"--- Response text: {e.response.text} ---")
         raise HTTPException(status_code=500, detail=f"Failed to send command to agent: {e}")
 
 # This block allows us to run the server directly from the script

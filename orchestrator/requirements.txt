@@ -3,3 +3,4 @@ uvicorn
 websockets
 python-socketio
 pydantic
+requests
