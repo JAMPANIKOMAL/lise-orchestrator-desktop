@@ -9,7 +9,8 @@ import uvicorn
 import yaml
 import os
 import requests
-import sys # New import
+import sys
+import re
 from typing import List
 
 # --- Helper Function for PyInstaller ---
@@ -52,11 +53,10 @@ class LogEntry(BaseModel):
 app = FastAPI(
     title="LISE Orchestrator API",
     description="The central command server for the Local Incident Simulation Environment.",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # --- Mount Static Files ---
-# FIX: Use the resource_path helper to find the static directory
 app.mount("/static", StaticFiles(directory=resource_path("static")), name="static")
 
 # --- IN-MEMORY DATABASE ---
@@ -64,7 +64,6 @@ db = { "agents": {}, "scenarios": [] }
 
 # --- Helper Functions ---
 def load_scenarios():
-    # FIX: Use resource_path to find the scenarios directory
     scenarios_dir = resource_path("scenarios")
     if not os.path.exists(scenarios_dir):
         print(f"--- WARNING: Scenarios directory '{scenarios_dir}' not found. ---")
@@ -75,6 +74,11 @@ def load_scenarios():
             db["scenarios"].append({"name": filename, "compose_file_path": filepath})
     print(f"--- Loaded {len(db['scenarios'])} scenarios. ---")
 
+def strip_ansi_codes(s):
+    """Removes ANSI escape codes from a string."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', s)
+
 # --- FastAPI Events ---
 @app.on_event("startup")
 async def startup_event():
@@ -84,7 +88,6 @@ async def startup_event():
 
 @app.get("/", response_class=FileResponse, tags=["UI"])
 async def read_index():
-    # FIX: Use resource_path to find the index.html file
     return resource_path("static/index.html")
 
 @app.websocket("/ws/log-stream")
@@ -99,7 +102,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/api/log", tags=["Logging"])
 async def receive_log(entry: LogEntry):
-    log_message = f"[{entry.agent_name}] {entry.log_line}"
+    log_line_clean = strip_ansi_codes(entry.log_line)
+    log_message = f"[{entry.agent_name}] {log_line_clean}"
     await manager.broadcast(log_message)
     return {"status": "log received"}
 
@@ -129,16 +133,16 @@ async def start_simulation(sim_request: SimulationRequest):
 
     agent_ip = agent_info["ip_address"]
     agent_url = f"http://{agent_ip}:8000/api/scenario/start"
-    
-    # Read the scenario file content and send it instead of just the path
+
     scenario_file_path = scenario_info["compose_file_path"]
     try:
         with open(scenario_file_path, 'r') as f:
             scenario_content = f.read()
+
         payload = {
-            "scenario_name": sim_request.scenario_name,
             "compose_file_content": scenario_content,
-            "compose_file_path": scenario_file_path  # Keep this for backward compatibility
+            "vnc_port": 5901,
+            "web_port": 5000
         }
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Scenario file not found: {scenario_file_path}")
@@ -147,29 +151,10 @@ async def start_simulation(sim_request: SimulationRequest):
 
     try:
         print(f"--- Sending start command for '{sim_request.scenario_name}' to {sim_request.agent_name} at {agent_ip} ---")
-        print(f"--- Agent URL: {agent_url} ---")
-        print(f"--- Payload keys: {list(payload.keys())} ---")
-        
-        # First, check if the agent is reachable
-        try:
-            health_response = requests.get(f"http://{agent_ip}:8000/health", timeout=5)
-            print(f"--- Agent health check: {health_response.status_code} ---")
-        except requests.exceptions.RequestException:
-            print("--- Warning: Agent health check failed, proceeding anyway ---")
-        
         response = requests.post(agent_url, json=payload, timeout=30)
-        print(f"--- Response status: {response.status_code} ---")
-        
-        if response.status_code != 200:
-            print(f"--- Response body: {response.text} ---")
-            
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"--- Request failed: {e} ---")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"--- Response status: {e.response.status_code} ---")
-            print(f"--- Response text: {e.response.text} ---")
         raise HTTPException(status_code=500, detail=f"Failed to send command to agent: {e}")
 
 # This block allows us to run the server directly from the script
