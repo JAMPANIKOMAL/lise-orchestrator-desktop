@@ -141,7 +141,7 @@ async def start_simulation(sim_request: SimulationRequest):
 
         payload = {
             "compose_file_content": scenario_content,
-            "vnc_port": 5901,
+            "vnc_port": 5900,
             "web_port": 5000
         }
     except FileNotFoundError:
